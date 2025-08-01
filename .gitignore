@@ -1,0 +1,35 @@
+# Kernel module build artifacts
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+*.o
+*.cmd
+.*.cmd
+Module.symvers
+modules.order
+
+# Nix build artifacts
+result
+result-*
+
+# Direnv
+.direnv/
+.envrc
+
+# Editor/IDE files
+*~
+.*.swp
+.*.swo
+*.orig
+.vscode/
+.idea/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
