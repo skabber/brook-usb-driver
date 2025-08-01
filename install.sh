@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Brook PS5 Controller Driver Installation Script
 
