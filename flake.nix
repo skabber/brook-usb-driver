@@ -1,131 +1,126 @@
 {
-  description = "Brook PS5 Controller Driver Development Environment";
+  description = "Brook PS5 Controller Driver";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs =
-    {
-      self,
-      nixpkgs,
-      flake-utils,
-    }:
-    flake-utils.lib.eachDefaultSystem (
-      system:
+  outputs = { self, flake-utils, nixpkgs }:
+    flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-
-        # Try to match the running kernel version or use the latest available
-        # Running kernel: 6.16.0, closest available: 6.15.8
-        runningKernel = builtins.readFile "/proc/version";
-        kernelPackages =
-          # Try latest first for best compatibility
-          if builtins.hasAttr "linuxPackages_latest" pkgs then
-            pkgs.linuxPackages_latest
-          else if builtins.hasAttr "linuxPackages_6_16" pkgs then
-            pkgs.linuxPackages_6_16
-          else
-            pkgs.linuxPackages;
-
-        buildInputs = with pkgs; [
-          # Kernel development
-          kernelPackages.kernel.dev
-          kernelPackages.kernel
-
-          # Build tools
-          gnumake
-          gcc
-          binutils
-
-          # Development tools
-          gdb
-          strace
-          usbutils
-          pciutils
-
-          # Documentation and utilities
-          man-pages
-          linux-manual
-
-          # Text processing
-          coreutils
-          findutils
-          gnugrep
-          gnused
-        ];
-
-      in
-      {
-        devShells.default = pkgs.mkShell {
-          inherit buildInputs;
-
-          shellHook = ''
-            echo "Brook PS5 Controller Driver Development Environment"
-            echo "=============================================="
-            echo "Kernel version: ${kernelPackages.kernel.version}"
-            echo "Kernel source:  ${kernelPackages.kernel.dev}/lib/modules/${kernelPackages.kernel.modDirVersion}/build"
-            echo ""
-            echo "Available commands:"
-            echo "  make          - Build the driver module"
-            echo "  make install  - Install the driver (requires sudo)"
-            echo "  make clean    - Clean build artifacts"
-            echo ""
-            echo "To load the driver:"
-            echo "  sudo insmod brook_ps5.ko"
-            echo ""
-            echo "To unload the driver:"
-            echo "  sudo rmmod brook_ps5"
-            echo ""
-            echo "To check driver status:"
-            echo "  lsmod | grep brook"
-            echo "  dmesg | tail"
-            echo ""
-
-            # Set kernel build directory
-            export KERNEL_BUILD_DIR="${kernelPackages.kernel.dev}/lib/modules/${kernelPackages.kernel.modDirVersion}/build"
-            export KERNEL_VERSION="${kernelPackages.kernel.modDirVersion}"
-
-            # Add current directory to PATH for convenience
-            export PATH="$PWD:$PATH"
-          '';
-
-          # Environment variables for kernel module compilation
-          KERNEL_BUILD_DIR = "${kernelPackages.kernel.dev}/lib/modules/${kernelPackages.kernel.modDirVersion}/build";
-          KERNEL_VERSION = kernelPackages.kernel.modDirVersion;
-        };
-
-        # Package for the brook driver
-        packages.brook-ps5-driver = pkgs.stdenv.mkDerivation {
+        
+        # Function to build for a specific kernel
+        buildBrookDriver = kernel: pkgs.stdenv.mkDerivation rec {
           pname = "brook-ps5-driver";
           version = "1.0";
-
+          
           src = ./.;
-
-          nativeBuildInputs = with pkgs; [
-            gnumake
-            gcc
-            kernelPackages.kernel.dev
-          ];
-
+          
+          hardeningDisable = [ "pic" ];
+          
+          nativeBuildInputs = kernel.moduleBuildDependencies;
+          
           makeFlags = [
-            "KERNEL_BUILD_DIR=${kernelPackages.kernel.dev}/lib/modules/${kernelPackages.kernel.modDirVersion}/build"
+            "KERNELRELEASE=${kernel.modDirVersion}"
+            "KERNEL_DIR=${kernel.dev}/lib/modules/${kernel.modDirVersion}/build"
+            "M=$(PWD)"
           ];
-
-          installPhase = ''
-            mkdir -p $out/lib/modules/${kernelPackages.kernel.modDirVersion}/extra
-            cp brook_ps5.ko $out/lib/modules/${kernelPackages.kernel.modDirVersion}/extra/
+          
+          preBuild = ''
+            substituteInPlace Makefile \
+              --replace '/lib/modules/$(shell uname -r)/build' \
+                        '${kernel.dev}/lib/modules/${kernel.modDirVersion}/build'
           '';
-
+          
+          installPhase = ''
+            runHook preInstall
+            
+            mkdir -p $out/lib/modules/${kernel.modDirVersion}/extra
+            cp brook_ps5.ko $out/lib/modules/${kernel.modDirVersion}/extra/
+            
+            # Create modprobe configuration
+            mkdir -p $out/etc/modprobe.d
+            cat > $out/etc/modprobe.d/brook-ps5.conf <<EOF
+            # Brook PS5 Controller Driver
+            # Ensure this driver loads before the playstation driver
+            softdep playstation pre: brook_ps5
+            EOF
+            
+            runHook postInstall
+          '';
+          
           meta = with pkgs.lib; {
             description = "Linux kernel driver for Brook PS5 controller boards";
+            homepage = "https://github.com/yourusername/brook-usb-driver";
             license = licenses.gpl2;
             platforms = platforms.linux;
+            maintainers = [ ];
           };
         };
-
-        packages.default = self.packages.${system}.brook-ps5-driver;
-      }
-    );
+      in
+      rec {
+        packages = {
+          # Build for different kernels
+          brook-ps5-driver = buildBrookDriver pkgs.linuxPackages.kernel;
+          brook-ps5-driver-latest = buildBrookDriver pkgs.linuxPackages_latest.kernel;
+          brook-ps5-driver-6_15 = buildBrookDriver pkgs.linuxPackages_6_15.kernel;
+          
+          default = packages.brook-ps5-driver;
+        };
+        
+        # For NixOS system configuration
+        nixosModules.default = { config, lib, pkgs, ... }: {
+          options.hardware.brook-ps5.enable = lib.mkEnableOption "Brook PS5 controller support";
+          
+          config = lib.mkIf config.hardware.brook-ps5.enable {
+            boot.extraModulePackages = [ 
+              (buildBrookDriver config.boot.kernelPackages.kernel) 
+            ];
+            boot.kernelModules = [ "brook_ps5" ];
+            
+            # Blacklist the standard playstation driver to avoid conflicts
+            boot.blacklistedKernelModules = [ "hid-playstation" ];
+          };
+        };
+        
+        devShells.default = pkgs.mkShell {
+          buildInputs = with pkgs; [
+            # Kernel development
+            linuxPackages.kernel.dev
+            
+            # Build tools
+            gnumake
+            gcc
+            pkg-config
+            
+            # Testing tools
+            evtest
+            usbutils
+            
+            # Utilities
+            ripgrep
+            findutils
+          ];
+          
+          shellHook = ''
+            echo "Brook PS5 Controller Driver Development"
+            echo "======================================"
+            echo ""
+            echo "Build commands:"
+            echo "  nix build                  - Build for default kernel"
+            echo "  nix build .#brook-ps5-driver-latest - Build for latest kernel"
+            echo ""
+            echo "Testing:"
+            echo "  make test                  - Test with evtest"
+            echo "  make debug                 - Show kernel messages"
+            echo ""
+            echo "For NixOS configuration, add to flake:"
+            echo "  inputs.brook-driver.url = \"path:/path/to/brook-usb-driver\";"
+            echo "  hardware.brook-ps5.enable = true;"
+            echo ""
+          '';
+        };
+      });
 }
